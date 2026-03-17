@@ -3,6 +3,8 @@ import cv2
 import time
 import pyttsx3
 import face_recognition
+import requests
+import threading
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
@@ -12,6 +14,7 @@ app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
 engine = pyttsx3.init()
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1483333803630923827/fswbv8b02CXRrVhwjTE1pajBm8hmh51kXzpNNd-zc9R9uEqFpndysri-VFoeoxcpap2S"
 
 
 def speak(text):
@@ -62,6 +65,13 @@ active_track_ids = set()
 seen_track_ids = set()
 tracked_objects = {}
 
+person_id_to_name = {}
+person_id_last_seen = {}
+TRACK_NAME_TIMEOUT = 3.0
+
+last_alert_time = {}
+ALERT_COOLDOWN = 10  # seconds
+
 
 def add_event(message: str):
     global event_log
@@ -72,10 +82,49 @@ def add_event(message: str):
         event_log.insert(0, entry)
         event_log = event_log[:10]
 
+        # 🔥 send alert for important events
+        if "Unknown face" in message and should_send_alert("unknown_face"):
+            send_discord_alert(entry, "WARNING")
+
+        if "restricted" in message.lower():
+            send_discord_alert(entry, "CRITICAL")
+
+
+def should_send_alert(key):
+    now = time.time()
+    if key not in last_alert_time or (now - last_alert_time[key]) > ALERT_COOLDOWN:
+        last_alert_time[key] = now
+        return True
+    return False
+
+
+def send_discord_alert(message: str, level="INFO"):
+    import threading
+
+    def _send():
+        try:
+            icon = {
+                "INFO": "🔵",
+                "WARNING": "🟡",
+                "CRITICAL": "🔴"
+            }.get(level, "⚪")
+
+            payload = {
+                "content": f"{icon} [{level}] {message}"
+            }
+
+            requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=2)
+
+        except Exception:
+            pass
+
+    threading.Thread(target=_send, daemon=True).start()
+
 
 def set_camera_source(source_name: str):
     global cap, active_camera, frame_count, last_face_names, last_face_data
     global active_track_ids, seen_track_ids, tracked_objects
+    global person_id_to_name, person_id_last_seen
 
     if source_name not in camera_sources:
         raise ValueError(f"Unknown camera source: {source_name}")
@@ -97,6 +146,8 @@ def set_camera_source(source_name: str):
     active_track_ids = set()
     seen_track_ids = set()
     tracked_objects = {}
+    person_id_to_name = {}
+    person_id_last_seen = {}
 
     add_event(f"Camera switched to: {source_name}")
 
@@ -131,7 +182,7 @@ def generate_frames():
         frame_count += 1
         frame = cv2.resize(frame, (640, 480))
 
-        results = model.track(frame, persist=True)
+        results = model.track(frame, persist=True, conf=0.65)
         annotated_frame = results[0].plot()
         boxes = results[0].boxes
 
@@ -140,6 +191,7 @@ def generate_frames():
 
         object_counts = {}
         object_stats = {}
+        person_tracks = []
 
         if boxes is not None and len(boxes) > 0:
             for box in boxes:
@@ -152,21 +204,39 @@ def generate_frames():
                 object_stats[label] = object_stats.get(label, 0) + 1
                 last_detected = label
 
-                if track_id != -1:
+                if label == "person" and track_id != -1:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                    w, h = x2 - x1, y2 - y1
+
+                    if w < 60 or h < 120:
+                        continue
+
+                    aspect_ratio = w / h if h > 0 else 0
+                    if aspect_ratio < 0.15 or aspect_ratio > 1.2:
+                        continue
+
+                    person_tracks.append({
+                        "track_id": track_id,
+                        "bbox": (x1, y1, x2, y2)
+                    })
+
                     active_ids_this_frame.add(track_id)
                     current_tracked_objects[track_id] = label
 
                     if track_id not in seen_track_ids:
                         seen_track_ids.add(track_id)
-                        add_event(f"{label.capitalize()} #{track_id} detected")
-
+                        add_event(f"Person #{track_id} detected")
         else:
             last_detected = "None"
 
         lost_ids = active_track_ids - active_ids_this_frame
         for lost_id in lost_ids:
-            old_label = tracked_objects.get(lost_id, "Object")
-            add_event(f"{old_label.capitalize()} #{lost_id} left view")
+            if tracked_objects.get(lost_id) == "person":
+                known_name = person_id_to_name.get(lost_id)
+                if known_name:
+                    add_event(f"Person #{lost_id} ({known_name}) left view")
+                else:
+                    add_event(f"Person #{lost_id} left view")
 
         active_track_ids = active_ids_this_frame
         tracked_objects = current_tracked_objects
@@ -210,17 +280,48 @@ def generate_frames():
                     if matches[best_match_index]:
                         name = known_face_names[best_match_index]
 
-                current_faces.append(name)
-                current_face_data.append((top, right, bottom, left, name))
+                matched_track_id = find_matching_person_track(
+                    (top, right, bottom, left),
+                    person_tracks
+                )
+
+                if matched_track_id is not None and name != "Unknown":
+                    old_name = person_id_to_name.get(matched_track_id)
+                    person_id_to_name[matched_track_id] = name
+                    person_id_last_seen[matched_track_id] = time.time()
+
+                    if old_name != name:
+                        add_event(
+                            f"Person #{matched_track_id} identified as {name}")
+
+                display_name = name
+                if matched_track_id is not None:
+                    if name != "Unknown":
+                        display_name = f"Person #{matched_track_id} - {name}"
+                    elif matched_track_id in person_id_to_name:
+                        display_name = f"Person #{matched_track_id} - {person_id_to_name[matched_track_id]}"
+                    else:
+                        display_name = f"Person #{matched_track_id} - Unknown"
+
+                current_faces.append(display_name)
+                current_face_data.append(
+                    (top, right, bottom, left, display_name))
 
                 if name != "Unknown" and name != last_spoken_face:
                     add_event(f"Known face detected: {name}")
                     last_spoken_face = name
                 elif name == "Unknown":
                     current_time = time.time()
+                    stale_ids = []
                     if current_time - last_unknown_face_time >= UNKNOWN_FACE_COOLDOWN:
                         add_event("Unknown face detected")
                         last_unknown_face_time = current_time
+                    for track_id, last_seen_time in person_id_last_seen.items():
+                        if track_id not in active_track_ids and (current_time - last_seen_time) > TRACK_NAME_TIMEOUT:
+                            stale_ids.append(track_id)
+                    for track_id in stale_ids:
+                        person_id_last_seen.pop(track_id, None)
+                        person_id_to_name.pop(track_id, None)
 
             last_face_names = current_faces
             last_face_data = current_face_data
@@ -260,6 +361,20 @@ def generate_frames():
         )
 
 
+def find_matching_person_track(face_box, person_tracks):
+    top, right, bottom, left = face_box
+    face_center_x = (left + right) // 2
+    face_center_y = (top + bottom) // 2
+
+    for track in person_tracks:
+        x1, y1, x2, y2 = track["bbox"]
+
+        if x1 <= face_center_x <= x2 and y1 <= face_center_y <= y2:
+            return track["track_id"]
+
+    return None
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
@@ -275,14 +390,23 @@ def video_feed():
 
 @app.get("/stats")
 def get_stats():
+    tracked_people = []
+
+    for track_id in sorted(active_track_ids):
+        tracked_people.append({
+            "track_id": track_id,
+            "name": person_id_to_name.get(track_id, "Unknown")
+        })
+
     return {
         "objects": object_stats,
         "last_detected": last_detected,
         "faces": recognized_faces,
         "events": event_log,
         "active_camera": active_camera,
-        "active_tracks": list(active_track_ids),
-        "total_unique_tracks": len(seen_track_ids)
+        "active_tracks": sorted(list(active_track_ids)),
+        "total_unique_tracks": len(seen_track_ids),
+        "tracked_people": tracked_people
     }
 
 
