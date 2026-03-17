@@ -9,12 +9,16 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from ultralytics import YOLO
+from dotenv import load_dotenv
+import os
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
+load_dotenv()
+
 engine = pyttsx3.init()
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1483333803630923827/fswbv8b02CXRrVhwjTE1pajBm8hmh51kXzpNNd-zc9R9uEqFpndysri-VFoeoxcpap2S"
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 
 def speak(text):
