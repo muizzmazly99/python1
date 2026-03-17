@@ -88,9 +88,124 @@
             color: #94a3b8;
         }
 
+        .camera-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+            margin: 16px 0 20px 0;
+            padding: 16px;
+            background: #1e293b;
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        }
+
+        .camera-badge {
+            padding: 10px 14px;
+            background: #0b1220;
+            border-radius: 10px;
+            color: #93c5fd;
+            font-weight: bold;
+        }
+
+        .camera-toggle {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: #e2e8f0;
+            font-weight: bold;
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 56px;
+            height: 30px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            inset: 0;
+            cursor: pointer;
+            background: #334155;
+            border-radius: 999px;
+            transition: 0.3s ease;
+        }
+
+        .slider::before {
+            content: "";
+            position: absolute;
+            width: 22px;
+            height: 22px;
+            left: 4px;
+            top: 4px;
+            background: white;
+            border-radius: 50%;
+            transition: 0.3s ease;
+        }
+
+        .switch input:checked+.slider {
+            background: #2563eb;
+        }
+
+        .switch input:checked+.slider::before {
+            transform: translateX(26px);
+        }
+
+        .stat-highlight {
+            background: #111827;
+            border-radius: 10px;
+            padding: 10px 12px;
+            margin-bottom: 10px;
+        }
+
+        .stat-label {
+            color: #94a3b8;
+            font-size: 13px;
+            margin-bottom: 4px;
+        }
+
+        .stat-value {
+            color: #f8fafc;
+            font-size: 20px;
+            font-weight: bold;
+        }
+
+        .track-pill-wrap {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .track-pill {
+            background: #1d4ed8;
+            color: white;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: bold;
+        }
+
         @media (max-width: 900px) {
             .dashboard {
                 grid-template-columns: 1fr;
+            }
+
+            .camera-controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .camera-badge {
+                width: 100%;
+                box-sizing: border-box;
             }
         }
     </style>
@@ -99,15 +214,32 @@
 <body>
     <div class="container">
         <h1>Smart AI Camera Dashboard</h1>
-        <p>Live object detection and face recognition from webcam.</p>
+        <p>Live object detection, face recognition, and person tracking from selectable camera sources.</p>
+
+        <div class="camera-controls">
+            <div class="camera-toggle">
+                <span>Webcam</span>
+                <label class="switch">
+                    <input type="checkbox" id="cameraToggle" onchange="toggleCamera()">
+                    <span class="slider"></span>
+                </label>
+                <span>Mobile</span>
+            </div>
+            <div class="camera-badge" id="active-camera">Active Camera: Loading...</div>
+        </div>
 
         <div class="dashboard">
             <div class="card">
-                <img src="/video_feed" alt="Live Camera Feed">
+                <img id="video-stream" src="/video_feed" alt="Live Camera Feed">
                 <div class="status">System Status: Running</div>
             </div>
 
             <div class="panel">
+                <div class="panel-box">
+                    <h2>Tracked People</h2>
+                    <div id="tracking-stats" class="empty">Loading...</div>
+                </div>
+
                 <div class="panel-box">
                     <h2>Live Object Statistics</h2>
                     <div id="object-stats" class="empty">Loading...</div>
@@ -127,12 +259,86 @@
     </div>
 
     <script>
-        async function loadStats() {
-            const res = await fetch("/stats");
-            const data = await res.json();
+        async function loadCameraSources() {
+            try {
+                const res = await fetch("/camera_sources");
+                const data = await res.json();
 
+                document.getElementById("active-camera").textContent =
+                    `Active Camera: ${data.active_camera}`;
+
+                document.getElementById("cameraToggle").checked =
+                    data.active_camera === "mobile";
+            } catch (error) {
+                document.getElementById("active-camera").textContent =
+                    "Active Camera: Error loading camera sources";
+            }
+        }
+
+        async function toggleCamera() {
+            const toggle = document.getElementById("cameraToggle");
+            const sourceName = toggle.checked ? "mobile" : "webcam";
+
+            document.getElementById("active-camera").textContent =
+                `Active Camera: Switching to ${sourceName}...`;
+
+            try {
+                const response = await fetch(`/switch_camera/${sourceName}`, {
+                    method: "POST"
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    document.getElementById("active-camera").textContent =
+                        `Active Camera: ${data.active_camera}`;
+
+                    document.getElementById("video-stream").src =
+                        `/video_feed?ts=${Date.now()}`;
+                } else {
+                    toggle.checked = !toggle.checked;
+                    document.getElementById("active-camera").textContent =
+                        "Active Camera: Switch failed";
+                    alert(data.detail || "Failed to switch camera");
+                }
+            } catch (error) {
+                toggle.checked = !toggle.checked;
+                document.getElementById("active-camera").textContent =
+                    "Active Camera: Switch failed";
+                alert("Error switching camera");
+            }
+        }
+
+        function renderTrackingStats(data) {
+            const activeTracks = data.active_tracks || [];
+            const totalUniqueTracks = data.total_unique_tracks || 0;
+
+            let html = `
+                <div class="stat-highlight">
+                    <div class="stat-label">Currently Tracked</div>
+                    <div class="stat-value">${activeTracks.length}</div>
+                </div>
+                <div class="stat-highlight">
+                    <div class="stat-label">Total Unique People Seen</div>
+                    <div class="stat-value">${totalUniqueTracks}</div>
+                </div>
+            `;
+
+            if (activeTracks.length === 0) {
+                html += `<p class="empty">No tracked people in view</p>`;
+            } else {
+                html += `<div class="stat-label">Active Person IDs</div>`;
+                html += `<div class="track-pill-wrap">`;
+                html += activeTracks.map(id => `<span class="track-pill">Person #${id}</span>`).join("");
+                html += `</div>`;
+            }
+
+            document.getElementById("tracking-stats").innerHTML = html;
+        }
+
+        function renderObjectStats(data) {
             let objectsHtml = "";
-            const objectEntries = Object.entries(data.objects);
+            const objectEntries = Object.entries(data.objects || {});
 
             if (objectEntries.length === 0) {
                 objectsHtml = `<p class="empty">No objects detected</p>`;
@@ -143,6 +349,10 @@
                 objectsHtml += `<p><b>Last Detected:</b> ${data.last_detected}</p>`;
             }
 
+            document.getElementById("object-stats").innerHTML = objectsHtml;
+        }
+
+        function renderFaceStats(data) {
             let facesHtml = "";
             if (!data.faces || data.faces.length === 0) {
                 facesHtml = `<p class="empty">No faces recognized</p>`;
@@ -150,6 +360,10 @@
                 facesHtml = "<ul>" + data.faces.map(face => `<li>${face}</li>`).join("") + "</ul>";
             }
 
+            document.getElementById("face-stats").innerHTML = facesHtml;
+        }
+
+        function renderEventLog(data) {
             let eventsHtml = "";
             if (!data.events || data.events.length === 0) {
                 eventsHtml = `<p class="empty">No events yet</p>`;
@@ -157,11 +371,38 @@
                 eventsHtml = "<ul>" + data.events.map(event => `<li>${event}</li>`).join("") + "</ul>";
             }
 
-            document.getElementById("object-stats").innerHTML = objectsHtml;
-            document.getElementById("face-stats").innerHTML = facesHtml;
             document.getElementById("event-log").innerHTML = eventsHtml;
         }
 
+        async function loadStats() {
+            try {
+                const res = await fetch("/stats");
+                const data = await res.json();
+
+                renderTrackingStats(data);
+                renderObjectStats(data);
+                renderFaceStats(data);
+                renderEventLog(data);
+
+                if (data.active_camera) {
+                    document.getElementById("active-camera").textContent =
+                        `Active Camera: ${data.active_camera}`;
+                    document.getElementById("cameraToggle").checked =
+                        data.active_camera === "mobile";
+                }
+            } catch (error) {
+                document.getElementById("tracking-stats").innerHTML =
+                    `<p class="empty">Failed to load tracking stats</p>`;
+                document.getElementById("object-stats").innerHTML =
+                    `<p class="empty">Failed to load stats</p>`;
+                document.getElementById("face-stats").innerHTML =
+                    `<p class="empty">Failed to load stats</p>`;
+                document.getElementById("event-log").innerHTML =
+                    `<p class="empty">Failed to load stats</p>`;
+            }
+        }
+
+        loadCameraSources();
         loadStats();
         setInterval(loadStats, 1000);
     </script>
